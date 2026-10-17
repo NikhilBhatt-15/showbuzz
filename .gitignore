@@ -1,0 +1,18 @@
+# build output & binaries
+web/node_modules/
+web/dist/
+services/showbuzz
+services/*.exe
+*.test
+
+# local env / editor
+.env
+.DS_Store
+.vscode/
+.idea/
+
+# research scratch (REA captures, screenshots) stays local
+captures/
+*.har
+*.png
+!web/public/*.png

@@ -1,0 +1,151 @@
+name: showbuzz
+
+x-service: &service
+  build: ./services
+  image: showbuzz/services:local
+  restart: unless-stopped
+  environment: &env
+    DATABASE_URL: postgres://showbuzz:showbuzz@postgres:5432/showbuzz
+    REDIS_ADDR: redis:6379
+    KAFKA_BROKERS: redpanda:9092
+    JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    PORT: "8080"
+  depends_on: &deps
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    redpanda: { condition: service_healthy }
+    seed: { condition: service_completed_successfully }
+
+services:
+  # ---- data stores --------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: showbuzz
+      POSTGRES_PASSWORD: showbuzz
+      POSTGRES_DB: showbuzz
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U showbuzz"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda start
+      - --mode dev-container
+      - --smp 1
+      - --memory 512M
+      - --kafka-addr internal://0.0.0.0:9092
+      - --advertise-kafka-addr internal://redpanda:9092
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:v1.20
+    ports: ["8025:8025"]
+
+  # ---- backend ------------------------------------------------------------
+  seed:
+    build: ./services
+    image: showbuzz/services:local
+    command: ["seed"]
+    restart: "no"
+    environment: *env
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  catalog:
+    <<: *service
+    command: ["catalog"]
+    environment:
+      <<: *env
+      PORT: "8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 5s
+      retries: 20
+
+  showtimes:
+    <<: *service
+    command: ["showtimes"]
+    environment:
+      <<: *env
+      PORT: "8082"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/healthz"]
+      interval: 5s
+      retries: 20
+
+  trans:
+    <<: *service
+    command: ["trans"]
+    environment:
+      <<: *env
+      PORT: "8083"
+      SEAT_HOLD_SECONDS: ${SEAT_HOLD_SECONDS:-600}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/healthz"]
+      interval: 5s
+      retries: 20
+
+  user:
+    <<: *service
+    command: ["user"]
+    environment:
+      <<: *env
+      PORT: "8084"
+      DEV_SHOW_OTP: ${DEV_SHOW_OTP:-true}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/healthz"]
+      interval: 5s
+      retries: 20
+
+  notify:
+    <<: *service
+    command: ["notify"]
+    environment:
+      <<: *env
+      SMTP_ADDR: mailpit:1025
+      SITE_URL: http://localhost:8080
+    depends_on:
+      <<: *deps
+      mailpit: { condition: service_started }
+
+  # ---- frontend & edge ----------------------------------------------------
+  web:
+    build: ./web
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://gateway
+      PORT: "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 5s
+      retries: 20
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes: ["./gateway/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["${PORT:-8080}:80"]
+    depends_on:
+      catalog: { condition: service_healthy }
+      showtimes: { condition: service_healthy }
+      trans: { condition: service_healthy }
+      user: { condition: service_healthy }
+      web: { condition: service_started }
+
+volumes:
+  pgdata:
